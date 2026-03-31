@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.Settings
+import android.widget.Toast
 import rikka.shizuku.Shizuku
 
 class MainActivity : Activity() {
@@ -15,11 +16,12 @@ class MainActivity : Activity() {
         private const val SHIZUKU_PERMISSION_REQUEST_CODE = 1001
         private const val KEY_MASTER_MONO = "master_mono"
         private const val KEY_MASTER_BALANCE = "master_balance"
-        private const val ALIAS_MONO_ON = "com.example.audiotoggle.MainActivityMonoOn"
-        private const val ALIAS_MONO_OFF = "com.example.audiotoggle.MainActivityMonoOff"
+        private const val ALIAS_MONO_ON = ".MainActivityMonoOn"
+        private const val ALIAS_MONO_OFF = ".MainActivityMonoOff"
     }
 
     private var started = false
+    private var failureNotified = false
 
     private val permissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode != SHIZUKU_PERMISSION_REQUEST_CODE) {
@@ -28,6 +30,7 @@ class MainActivity : Activity() {
         if (grantResult == PackageManager.PERMISSION_GRANTED) {
             runToggle()
         } else {
+            notifyFailureOnce("Shizuku permission denied")
             finish()
         }
     }
@@ -41,6 +44,7 @@ class MainActivity : Activity() {
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
+            notifyFailureOnce("Shizuku service disconnected")
             finish()
         }
     }
@@ -68,37 +72,21 @@ class MainActivity : Activity() {
         started = true
 
         if (!ensureShizukuReady()) {
+            notifyFailureOnce("Shizuku not ready")
             finish()
             return
         }
 
-        val args = Shizuku.UserServiceArgs(
-            ComponentName(packageName, ShizukuShellService::class.java.name)
-        )
-            .daemon(false)
-            .processNameSuffix("shizuku")
-            .debuggable(BuildConfig.DEBUG)
-            .version(BuildConfig.VERSION_CODE)
-            .tag("audio-toggle-shell")
-
         try {
-            Shizuku.bindUserService(args, serviceConnection)
+            Shizuku.bindUserService(userServiceArgs(), serviceConnection)
         } catch (_: Throwable) {
+            notifyFailureOnce("Failed to start Shizuku service")
             finish()
         }
     }
 
     private fun unbindUserService() {
-        val args = Shizuku.UserServiceArgs(
-            ComponentName(packageName, ShizukuShellService::class.java.name)
-        )
-            .daemon(false)
-            .processNameSuffix("shizuku")
-            .debuggable(BuildConfig.DEBUG)
-            .version(BuildConfig.VERSION_CODE)
-            .tag("audio-toggle-shell")
-
-        Shizuku.unbindUserService(args, serviceConnection, true)
+        Shizuku.unbindUserService(userServiceArgs(), serviceConnection, true)
     }
 
     private fun ensureShizukuReady(): Boolean {
@@ -122,22 +110,27 @@ class MainActivity : Activity() {
         return false
     }
 
-    private fun runCommands(service: IShizukuShellService): Boolean {
+    private fun runCommands(service: IShizukuShellService) {
         val currentMono = Settings.System.getInt(contentResolver, KEY_MASTER_MONO, 0)
         val targetMono = if (currentMono == 0) 1 else 0
         val currentBalance = readBalance(service)
         val targetBalance = if (targetMono == 1) -1.0f else 0.0f
 
         val monoExit = service.exec("settings put system master_mono $targetMono")
-        if (monoExit != 0) return false
+        if (monoExit != 0) {
+            notifyFailureOnce("Failed to update mono setting")
+            return
+        }
 
         if (currentBalance != targetBalance) {
             val balanceExit = service.exec("settings put system master_balance $targetBalance")
-            if (balanceExit != 0) return false
+            if (balanceExit != 0) {
+                notifyFailureOnce("Failed to update balance setting")
+                return
+            }
         }
 
         updateLauncherIcon(targetMono == 1)
-        return true
     }
 
     private fun readBalance(service: IShizukuShellService): Float {
@@ -150,14 +143,31 @@ class MainActivity : Activity() {
         val disableAlias = if (isMonoOn) ALIAS_MONO_OFF else ALIAS_MONO_ON
 
         packageManager.setComponentEnabledSetting(
-            ComponentName(this, enableAlias),
+            ComponentName(this, BuildConfig.APPLICATION_ID + enableAlias),
             PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
             PackageManager.DONT_KILL_APP
         )
         packageManager.setComponentEnabledSetting(
-            ComponentName(this, disableAlias),
+            ComponentName(this, BuildConfig.APPLICATION_ID + disableAlias),
             PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
             PackageManager.DONT_KILL_APP
         )
+    }
+
+    private fun notifyFailureOnce(message: String) {
+        if (failureNotified) return
+        failureNotified = true
+        Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun userServiceArgs(): Shizuku.UserServiceArgs {
+        return Shizuku.UserServiceArgs(
+            ComponentName(packageName, ShizukuShellService::class.java.name)
+        )
+            .daemon(false)
+            .processNameSuffix("shizuku")
+            .debuggable(BuildConfig.DEBUG)
+            .version(BuildConfig.VERSION_CODE)
+            .tag("audio-toggle-shell")
     }
 }
